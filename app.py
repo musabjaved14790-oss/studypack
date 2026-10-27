@@ -69,12 +69,12 @@ def main():
         model_name = st.selectbox(
             "LLM Model",
             options=[
-                "llama-3.3-70b-versatile",
+                "openai/gpt-oss-120b",
                 "llama-3.1-8b-instant",
                 "mixtral-8x7b-32768",
             ],
             index=0,
-            help="llama-3.3-70b-versatile is recommended for complex multi-stage reasoning.",
+            help="openai/gpt-oss-120b is recommended for complex multi-stage reasoning.",
         )
 
         temperature = st.slider(
