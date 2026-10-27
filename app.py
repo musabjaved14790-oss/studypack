@@ -1,5 +1,6 @@
 """
 Streamlit Frontend for the Multi-Stage AI Study Pack Generator.
+Includes support for openai/gpt-oss-120b and TPM rate-limit pacing.
 """
 
 import os
@@ -10,9 +11,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from workflow import WorkflowContext, StudyPackWorkflow
-import prompts
 
-# Load local environment variables if present
 load_dotenv()
 
 st.set_page_config(
@@ -24,7 +23,7 @@ st.set_page_config(
 
 
 def create_project_zip() -> bytes:
-    """Packages the project source files into a downloadable ZIP archive for GitHub/Streamlit deployment."""
+    """Packages the project source files into a downloadable ZIP archive."""
     buffer = io.BytesIO()
     files_to_pack = ["app.py", "workflow.py", "prompts.py", "requirements.txt"]
 
@@ -32,14 +31,10 @@ def create_project_zip() -> bytes:
         for filename in files_to_pack:
             if os.path.exists(filename):
                 zf.write(filename, arcname=filename)
-        # Add a helpful README.md inside the zip
         readme_content = (
             "# AI Study Pack Generator\n\n"
             "Multi-stage AI workflow decomposing study pack creation into Planning, "
-            "Content Generation, Assessment, Quality Review, and Refinement.\n\n"
-            "## Quick Start\n"
-            "1. `pip install -r requirements.txt`\n"
-            "2. `streamlit run app.py`\n"
+            "Content Generation, Assessment, Quality Review, and Refinement.\n"
         )
         zf.writestr("README.md", readme_content)
 
@@ -48,16 +43,16 @@ def create_project_zip() -> bytes:
 
 
 def main():
-    # -----------------------------------------------------------------
-    # SIDEBAR: API Configuration & Source Code Downloads
-    # -----------------------------------------------------------------
     with st.sidebar:
         st.title("⚙️ Workflow Settings")
 
-        # Resolve API Key from Streamlit Secrets, Environment, or User Input
         default_key = os.getenv("GROQ_API_KEY", "")
-        if not default_key and "GROQ_API_KEY" in st.secrets:
-            default_key = st.secrets["GROQ_API_KEY"]
+        if not default_key:
+            try:
+                if "GROQ_API_KEY" in st.secrets:
+                    default_key = st.secrets["GROQ_API_KEY"]
+            except Exception:
+                pass
 
         api_key = st.text_input(
             "Groq API Key",
@@ -70,11 +65,11 @@ def main():
             "LLM Model",
             options=[
                 "openai/gpt-oss-120b",
+                "llama-3.3-70b-versatile",
                 "llama-3.1-8b-instant",
-                "mixtral-8x7b-32768",
             ],
             index=0,
-            help="openai/gpt-oss-120b is recommended for complex multi-stage reasoning.",
+            help="Both gpt-oss-120b and llama-3.3-70b-versatile are automatically budgeted for the 8,000 TPM free tier.",
         )
 
         temperature = st.slider(
@@ -83,17 +78,23 @@ def main():
             max_value=1.0,
             value=0.4,
             step=0.1,
-            help="Lower values keep outputs strictly factual and structured.",
+        )
+
+        inter_stage_delay = st.slider(
+            "Cooldown Between Stages (sec)",
+            min_value=0.0,
+            max_value=15.0,
+            value=4.0,
+            step=1.0,
+            help="Pauses briefly between stages so Groq's 8,000 Tokens-Per-Minute (TPM) bucket refills.",
         )
 
         st.divider()
         st.subheader("📦 Download Project Files")
-        st.caption("Download the deployment-ready files for your GitHub repository:")
-
         try:
             zip_bytes = create_project_zip()
             st.download_button(
-                label="⬇️ Download All Source Files (.zip)",
+                label="⬇️ Download Source Files (.zip)",
                 data=zip_bytes,
                 file_name="ai_study_pack_generator_source.zip",
                 mime="application/zip",
@@ -102,18 +103,12 @@ def main():
         except Exception as e:
             st.caption(f"Zip bundler note: {e}")
 
-    # -----------------------------------------------------------------
-    # MAIN HEADER
-    # -----------------------------------------------------------------
     st.title("🎓 Multi-Stage AI Study Pack Generator")
     st.markdown(
         "Decomposes personalized study material creation into a **5-stage AI pipeline**: "
         "**Planning → Content Generation → Assessment → Quality Audit → Refinement**."
     )
 
-    # -----------------------------------------------------------------
-    # INPUT FORM
-    # -----------------------------------------------------------------
     with st.form("study_pack_form"):
         col1, col2 = st.columns(2)
 
@@ -164,9 +159,6 @@ def main():
             "🚀 Run 5-Stage AI Workflow", use_container_width=True
         )
 
-    # -----------------------------------------------------------------
-    # WORKFLOW EXECUTION
-    # -----------------------------------------------------------------
     if submit_btn:
         if not api_key:
             st.error("🔑 Please enter your Groq API Key in the sidebar to run the workflow.")
@@ -183,6 +175,7 @@ def main():
             goals=goals.strip(),
             model_name=model_name,
             temperature=temperature,
+            inter_stage_delay=inter_stage_delay,
         )
 
         workflow = StudyPackWorkflow(api_key=api_key)
@@ -198,7 +191,9 @@ def main():
 
             if ctx.errors:
                 status_box.update(
-                    label="⚠️ Pipeline encountered an error", state="error", expanded=True
+                    label="⚠️ Pipeline halted with an error (Partial results saved below)",
+                    state="error",
+                    expanded=True,
                 )
                 for err in ctx.errors:
                     st.error(err)
@@ -211,17 +206,12 @@ def main():
                     expanded=False,
                 )
 
-        # Save result in session state so downloads persist across reruns
         st.session_state["workflow_ctx"] = ctx
 
-    # -----------------------------------------------------------------
-    # DISPLAY RESULTS & STAGE ARTIFACTS
-    # -----------------------------------------------------------------
     if "workflow_ctx" in st.session_state:
         ctx: WorkflowContext = st.session_state["workflow_ctx"]
 
         st.divider()
-        # Telemetry Metrics Row
         m1, m2, m3, m4, m5 = st.columns(5)
         m1.metric("1. Planning", f"{ctx.stage_timings.get('1_planning', 0)}s")
         m2.metric("2. Content", f"{ctx.stage_timings.get('2_content', 0)}s")
@@ -229,9 +219,8 @@ def main():
         m4.metric("4. QA Review", f"{ctx.stage_timings.get('4_review', 0)}s")
         m5.metric("5. Refinement", f"{ctx.stage_timings.get('5_refinement', 0)}s")
 
-        # Tabs for inspecting the final output and every intermediate stage
         tab_final, tab_plan, tab_content, tab_quiz, tab_review = st.tabs([
-            "📘 Final Refined Study Pack",
+            "📘 Final Master Study Pack",
             "🗺️ Stage 1: Study Plan",
             "📖 Stage 2: Draft Content",
             "📝 Stage 3: Draft Assessment",
@@ -256,9 +245,6 @@ def main():
         with tab_review:
             st.markdown(ctx.review_notes or "*No output generated.*")
 
-        # -------------------------------------------------------------
-        # EXPORT / DOWNLOAD STUDY PACK
-        # -------------------------------------------------------------
         st.divider()
         st.subheader("📥 Export Generated Study Pack")
         dl_col1, dl_col2 = st.columns(2)
@@ -282,9 +268,3 @@ def main():
                 data=export_json,
                 file_name=f"workflow_trace_{safe_topic}.json",
                 mime="application/json",
-                use_container_width=True,
-            )
-
-
-if __name__ == "__main__":
-    main()
